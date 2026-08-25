@@ -1,0 +1,24 @@
+# Source distribution contents.
+#
+# An sdist of python-amber deliberately does NOT contain libamber.so: a binary
+# built on the packager's machine is exactly what an sdist must not ship, and
+# `pip install` from source is expected to build the engine (setup.py finds a
+# checkout via $AMBER_SRC, vendor/amber or ../amber) or link a system one. The
+# .k standard-library modules are likewise the engine's, not this package's.
+#
+# What the sdist DOES need is the vendored C header, without which the extension
+# cannot compile at all.
+include README.md
+include LICENSE
+include NOTICE
+include pyproject.toml
+include setup.py
+include include/amber_capi.h
+include src/py_amber.c
+recursive-include src/amber *.py py.typed
+recursive-include tests *.py
+recursive-include examples *.py
+recursive-include scripts *.sh
+global-exclude *.so *.dylib *.dll *.pyc __pycache__/*
+prune build
+prune dist
