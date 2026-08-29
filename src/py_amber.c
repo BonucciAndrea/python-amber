@@ -130,7 +130,7 @@ static int Value_getbuffer(ValueObject *self, Py_buffer *view, int flags) {
         view->obj = NULL;
         PyErr_Format(PyExc_BufferError,
                      "amber.Value of type '%s' has no flat buffer to export "
-                     "(use .to_list(), .to_str() or .columns() instead)",
+                     "(use .items(), .to_str() or .scalar() instead)",
                      amber_type_name(self->handle));
         return -1;
     }

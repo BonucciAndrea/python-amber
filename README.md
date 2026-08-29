@@ -270,9 +270,28 @@ where pandas had it.
 
 ## Building from source
 
+Point the build at the engine and install in editable mode. The `[dev]` extra
+pulls in pytest, NumPy, pandas and PyArrow, which the test suite needs:
+
 ```bash
-AMBER_SRC=/path/to/amber pip install -e .
-python -m pytest tests -q
+# Against a prebuilt libamber.so (nothing is recompiled):
+AMBER_LIB_DIR=/path/to/dir/holding/libamber.so \
+AMBER_SRC=/path/to/amber \
+    pip install -e ".[dev]"
+
+# ...or against an engine checkout, letting it build the library if absent:
+AMBER_SRC=/path/to/amber pip install -e ".[dev]"
+```
+
+`AMBER_LIB_DIR` supplies the prebuilt library; `AMBER_SRC` additionally supplies
+the eight `.k` standard-library modules, which the build copies into the package
+so the installed engine boots with its full vocabulary.
+
+Run the tests. Point `AMBER_HOME` at a directory containing `amber.k` unless the
+build already bundled the standard library:
+
+```bash
+AMBER_HOME=/path/to/amber python -m pytest tests -q
 ```
 
 `setup.py` looks for the engine in this order:
@@ -350,7 +369,7 @@ numbers.
 case. This bites everyone once.
 
 **`BufferError: … has no flat buffer to export`** — you asked for a memoryview
-of a table, a general list or an atom. Use `.columns()`, `.items()` or
+of a table, a general list or an atom. Use `.column(i)`, `.items()` or
 `.scalar()`.
 
 ---

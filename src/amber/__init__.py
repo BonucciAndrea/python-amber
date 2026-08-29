@@ -122,7 +122,7 @@ def home() -> str | None:
 
 
 def version() -> str:
-    """The engine version, e.g. ``'1.9.6'``."""
+    """The engine version, e.g. ``'2.0.0'``."""
     return _amber.version()
 
 
@@ -202,6 +202,27 @@ def get(name: str, *, raw: bool = False):
     return value if raw else to_python(value)
 
 
+def _is_column_dict(obj: Any) -> bool:
+    """True for a non-empty dict whose values are all equal-length sequences.
+
+    That shape is a table written column-wise -- ``{"sym": [...], "px": [...]}``
+    -- and :func:`set` routes it through :func:`make_table`. A ``str``/``bytes``
+    value counts as a scalar, not a sequence, so ``{"a": "x", "b": "y"}`` stays
+    an ordinary dictionary.
+    """
+    if not isinstance(obj, dict) or not obj:
+        return False
+    length = None
+    for v in obj.values():
+        if isinstance(v, (str, bytes)) or not hasattr(v, "__len__"):
+            return False
+        if length is None:
+            length = len(v)
+        elif len(v) != length:
+            return False
+    return True
+
+
 def set(name: str, obj: Any) -> None:              # noqa: A001 (shadowing is the API)
     """Bind an Amber global from a Python object.
 
@@ -210,7 +231,10 @@ def set(name: str, obj: Any) -> None:              # noqa: A001 (shadowing is th
     :func:`make_table`; a dict of anything else becomes an Amber dictionary.
     """
     _ensure()
-    _amber.set_global(name, obj)
+    if _is_column_dict(obj):
+        _amber.set_global(name, make_table(obj).value)
+    else:
+        _amber.set_global(name, obj)
 
 
 def delete(name: str) -> None:

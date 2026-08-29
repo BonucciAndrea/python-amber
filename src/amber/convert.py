@@ -59,7 +59,7 @@ def as_array(value: Value, *, copy: bool = False):
     np = _numpy()
     if np is None:
         raise ImportError("amber: NumPy is required for as_array(); "
-                          "use memoryview(value) or .to_list() instead")
+                          "use memoryview(value) or list(memoryview(value)) instead")
     value = value.flatten()
     arr = np.asarray(value)          # PEP 3118 -- no copy, `value` becomes base
     return arr.copy() if copy else arr

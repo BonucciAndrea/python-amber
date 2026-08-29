@@ -102,6 +102,19 @@ def test_set_from_python_types(am):
     assert am.eval("sum l1") == 6
 
 
+def test_set_dict_of_sequences_becomes_a_table(am):
+    """`set` with a dict of equal-length sequences builds a table (via
+    make_table); a dict of scalars stays an Amber dictionary."""
+    am.set("book", {"sym": ["AAPL", "MSFT"], "px": [187.2, 411.1]})
+    assert am.get("book", raw=True).is_table()
+    assert am.eval("#book") == 2
+    assert am.eval("sum book`px") == pytest.approx(598.3)
+
+    am.set("scalars", {"a": 1, "b": 2})
+    assert not am.get("scalars", raw=True).is_table()
+    assert am.get("scalars") == {"a": 1, "b": 2}
+
+
 def test_raw_values_are_opaque_handles(am):
     v = am.eval("1 2 3", raw=True)
     assert isinstance(v, am.Value)

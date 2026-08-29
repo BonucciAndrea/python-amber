@@ -43,8 +43,14 @@ def test_memoryview_is_readonly(am):
 
 def test_table_has_no_buffer(am):
     v = am.eval("([]a:1 2 3)", raw=True)
-    with pytest.raises(BufferError):
+    with pytest.raises(BufferError) as excinfo:
         memoryview(v)
+    # The hint must name methods that actually exist on Value, not the
+    # nonexistent .to_list()/.columns() the message used to suggest.
+    msg = str(excinfo.value)
+    assert ".to_list()" not in msg and ".columns()" not in msg
+    for method in ("items", "to_str", "scalar"):
+        assert hasattr(v, method)
 
 
 def test_arrow_buffer_aliases_engine_memory(taq):
