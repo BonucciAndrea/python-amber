@@ -38,6 +38,16 @@ from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 
+# Native Windows has no wheel, and the sdist cannot build there either: the engine
+# is POSIX (mmap, fork for peach, POSIX sockets). Say so in one line, before pip
+# goes looking for a C++ compiler and fails with something unrelated.
+if sys.platform == "win32" and not os.environ.get("AMBER_FORCE_WINDOWS"):
+    raise SystemExit(
+        "\namber-lang: native Windows isn't supported yet -- the Amber engine is POSIX code.\n"
+        "Install it inside WSL instead, where the wheels just work:\n"
+        "    wsl\n"
+        "    python3 -m venv ~/amb && ~/amb/bin/pip install amber-lang\n")
+
 HERE = Path(__file__).parent.resolve()
 PKG = HERE / "src" / "amber"
 

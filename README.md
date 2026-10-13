@@ -50,6 +50,9 @@ Wheels exist for Linux x86_64 and aarch64 and for Apple silicon Macs, on CPython
 3.10 to 3.14. Anywhere else pip builds from the sdist, which carries the engine's
 source, so all you need is a C compiler and bash.
 
+On Windows, use WSL: the engine is POSIX code (mmap, fork, POSIX sockets), so
+there's no native Windows build yet, and pip says so instead of trying.
+
 A binary wheel carries `libamber.so` **and** the eight `.k` standard-library
 modules, so this is genuinely all you need — no engine checkout, no
 `$AMBER_HOME`, no build toolchain.

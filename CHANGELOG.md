@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.9.1
+
+- On native Windows `pip install amber-lang` now says in one line to use WSL, instead of 89 lines ending in a
+  Visual C++ error. The engine is POSIX, so WSL is the way for now.
+- `library_path()` and `adopt()`, so amber-arrow always runs on the same engine, even from a repaired wheel.
+
 ## 2.9.0
 
 - **`pip install amber-lang`**: it's on PyPI now, still `import amber`. Wheels for Linux (x86_64, aarch64) and
