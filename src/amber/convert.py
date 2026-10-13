@@ -153,10 +153,10 @@ def _temporal_scalar(kind: int, raw: int):
     null = _INT32_NULL if bits == 32 else _INT64_NULL
     np = _numpy()
     if np is not None:
-        if raw == null:
-            return np.datetime64("NaT") if dtype.startswith("datetime") else np.timedelta64("NaT")
         unit = dtype[dtype.index("[") + 1:-1]
         cls = np.datetime64 if dtype.startswith("datetime") else np.timedelta64
+        if raw == null:
+            return cls("NaT", unit)               # with its unit: a unitless NaT is deprecated
         return cls(raw + shift, unit)
     if raw == null:
         return None

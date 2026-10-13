@@ -66,6 +66,7 @@ amber = ["libamber.so", "libamber.dylib", "amber.dll", "kmodules/*.k", "py.typed
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:amber.*"]
 
 # Wheels: Linux (manylinux, x86_64 + aarch64) and macOS (arm64 + x86_64), one
 # per CPython. The engine is built from vendor/amber inside each build

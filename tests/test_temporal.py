@@ -147,8 +147,9 @@ def test_from_pandas_timestamps_are_amber_timestamps(am):
     t = am.Table.from_pandas(df)
     assert t.dtypes == {"ts": "timestamp vector", "td": "timespan vector"}
     out = t.to_pandas()
-    pd.testing.assert_series_equal(out["ts"], df["ts"], check_names=False)
-    pd.testing.assert_series_equal(out["td"], df["td"], check_names=False)
+    # pandas 3 parses "1h" to microseconds; Amber's are always nanoseconds
+    pd.testing.assert_series_equal(out["ts"], df["ts"].astype("datetime64[ns]"), check_names=False)
+    pd.testing.assert_series_equal(out["td"], df["td"].astype("timedelta64[ns]"), check_names=False)
 
 
 def test_from_pandas_tz_aware_is_utc(am):
