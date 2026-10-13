@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.9.2
+
+- The old python-amber (`amber` 1.x) and amber-lang share the `amber` folder, and a mix of the two failed in
+  odd ways (`'ge` from inside `gentq`). Importing now says so and gives the two commands that fix it.
+
 ## 2.9.1
 
 - On native Windows `pip install amber-lang` now says in one line to use WSL, instead of 89 lines ending in a

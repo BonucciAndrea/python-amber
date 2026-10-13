@@ -35,8 +35,35 @@ import os
 import sys
 from typing import Any, Iterable, Sequence
 
-from . import _amber
-from ._amber import AmberError, Value  # noqa: F401  (re-exported)
+def _old_install_check() -> None:
+    """The first python-amber was published as `amber` 1.x. It and amber-lang both
+    install the `amber` package directory, so having both leaves a mix of their
+    files: an engine from one, a standard library or extension from the other,
+    and errors that make no sense ('ge from inside gentq). Say what it is."""
+    try:
+        from importlib.metadata import PackageNotFoundError, distribution
+        old = distribution("amber")
+    except (ImportError, PackageNotFoundError):
+        return
+    if not any(str(f).replace("\\", "/") == "amber/__init__.py" for f in (old.files or ())):
+        return                                   # some other project called "amber"
+    try:                                         # only when it is THIS folder it wrote into
+        theirs = os.path.realpath(os.path.dirname(str(old.locate_file("amber/__init__.py"))))
+    except Exception:                            # noqa: BLE001
+        return
+    if theirs != os.path.realpath(os.path.dirname(os.path.abspath(__file__))):
+        return
+    raise ImportError(
+        f"the old python-amber ({old.metadata['Name']} {old.version}) is installed next to amber-lang, and they "
+        "share the `amber` folder. Remove both, then install amber-lang again:\n"
+        "    pip uninstall -y amber amber-lang\n"
+        "    pip install amber-lang")
+
+
+_old_install_check()
+
+from . import _amber  # noqa: E402
+from ._amber import AmberError, Value  # noqa: F401,E402  (re-exported)
 
 from .table import Table
 from .convert import to_python, as_array, VECTOR_DTYPES, _to_amber_hook
@@ -52,7 +79,7 @@ __all__ = [
     "diagnostics", "shutdown",
 ]
 
-__version__ = "2.9.1"
+__version__ = "2.9.2"
 
 # --------------------------------------------------------------------------
 # boot

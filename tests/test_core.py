@@ -121,3 +121,30 @@ def test_raw_values_are_opaque_handles(am):
     assert isinstance(v, am.Value)
     assert v.count() == 3
     assert "vector" in v.type_name()
+
+
+
+def test_old_python_amber_alongside_is_refused(am, tmp_path):
+    """amber 1.x and amber-lang share the `amber` folder: importing must say so,
+    and only when it really is the same folder."""
+    import os, shutil, subprocess, sys, textwrap
+    pkg = os.path.dirname(am.__file__)
+    shutil.copytree(pkg, tmp_path / "amber", ignore=shutil.ignore_patterns("__pycache__"))
+    dist = tmp_path / "amber-1.9.6.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: amber\nVersion: 1.9.6\n")
+    (dist / "RECORD").write_text("amber/__init__.py,,\n")
+    code = textwrap.dedent(f"""
+        import sys; sys.path.insert(0, {str(tmp_path)!r})
+        try:
+            import amber
+            print("imported", amber.__file__)
+        except ImportError as e:
+            print("refused:", e)
+    """)
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable, "-s", "-c", code], capture_output=True, text=True, timeout=60, env=env)
+    assert "refused:" in r.stdout and "pip uninstall -y amber amber-lang" in r.stdout, r.stdout + r.stderr
+    shutil.rmtree(dist)                     # no old install: the same copy imports fine
+    r = subprocess.run([sys.executable, "-s", "-c", code], capture_output=True, text=True, timeout=60, env=env)
+    assert "imported" in r.stdout, r.stdout + r.stderr[-500:]
