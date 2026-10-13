@@ -130,6 +130,9 @@ def test_old_python_amber_alongside_is_refused(am, tmp_path):
     import os, shutil, subprocess, sys, textwrap
     pkg = os.path.dirname(am.__file__)
     shutil.copytree(pkg, tmp_path / "amber", ignore=shutil.ignore_patterns("__pycache__"))
+    for libs in os.listdir(os.path.dirname(pkg)):     # a repaired wheel's sibling amber_lang.libs (libgomp)
+        if libs.endswith(".libs") and libs.startswith("amber"):
+            shutil.copytree(os.path.join(os.path.dirname(pkg), libs), tmp_path / libs)
     dist = tmp_path / "amber-1.9.6.dist-info"
     dist.mkdir()
     (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: amber\nVersion: 1.9.6\n")
