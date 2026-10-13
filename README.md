@@ -340,7 +340,8 @@ Environment variables:
 | `AMBER_LIB_DIR` | Directory holding a prebuilt `libamber.so`. |
 | `AMBER_BUNDLE=0` | Do **not** copy the library and `.k` modules into the package. Right for a distro package, wrong for a wheel. |
 | `AMBER_FORCE_REBUILD=1` | Rebuild the engine even if a library is already there. |
-| `AMBER_HOME` | Where to load the `.k` standard library from at **run** time. |
+| `AMBER_PY_HOME` | Load the `.k` standard library from here instead of the bundled copy. |
+| `AMBER_HOME` | The REPL's variable: used here only when the package has no bundled standard library. |
 
 ---
 

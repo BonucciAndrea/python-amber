@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.9.3
+
+- The standard library bundled with the engine now wins over `$AMBER_HOME`. That variable is set wherever the REPL
+  is, and an older checkout's `.k` files don't fit a newer engine: `gentq` died with `'ge`. To point it somewhere
+  else on purpose, use `$AMBER_PY_HOME` or `am.init(home=...)`.
+
 ## 2.9.2
 
 - The old python-amber (`amber` 1.x) and amber-lang share the `amber` folder, and a mix of the two failed in

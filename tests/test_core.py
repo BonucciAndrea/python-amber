@@ -148,3 +148,21 @@ def test_old_python_amber_alongside_is_refused(am, tmp_path):
     shutil.rmtree(dist)                     # no old install: the same copy imports fine
     r = subprocess.run([sys.executable, "-s", "-c", code], capture_output=True, text=True, timeout=60, env=env)
     assert "imported" in r.stdout, r.stdout + r.stderr[-500:]
+
+
+
+def test_bundled_stdlib_beats_amber_home(am, tmp_path):
+    """$AMBER_HOME pointing at another release's .k files must not be loaded over
+    the engine's own: a 2.4 amber.k in a 2.9 engine broke gentq ('ge)."""
+    import os, subprocess, sys
+    (tmp_path / "amber.k").write_text("oldstdlib:1\n")
+    env = dict(os.environ, AMBER_HOME=str(tmp_path))
+    env.pop("AMBER_PY_HOME", None)
+    code = "import amber as am; am.gentq(100); print(am.home()); print(am.eval('#trades'))"
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, env=env)
+    assert r.returncode == 0, r.stderr[-600:]
+    assert str(tmp_path) not in r.stdout and r.stdout.split()[-1] == "100"
+    env = dict(env, AMBER_PY_HOME=str(tmp_path))
+    r = subprocess.run([sys.executable, "-c", "import amber as am; am.init(); print(am.home())"],
+                       capture_output=True, text=True, timeout=60, env=env)
+    assert r.stdout.strip() == str(tmp_path)

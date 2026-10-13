@@ -79,7 +79,7 @@ __all__ = [
     "diagnostics", "shutdown",
 ]
 
-__version__ = "2.9.2"
+__version__ = "2.9.3"
 
 # --------------------------------------------------------------------------
 # boot
@@ -104,13 +104,24 @@ def _bundled_home() -> str | None:
 
 
 def _discover_home() -> str | None:
-    """Where to load the standard library from, most explicit first."""
-    env = os.environ.get("AMBER_HOME")
+    """Where to load the standard library from.
+
+    The copy bundled with the engine comes FIRST: it is the one built with this
+    libamber, and a standard library from another release does not fit it (2.9's
+    parser turns `>=` into `Q.ge`, which 2.4's amber.k has never heard of, so
+    gentq died with 'ge). $AMBER_HOME is what the REPL uses, so it is set on most
+    machines that have Amber at all -- it is only a fallback here, for builds
+    without a bundled copy. $AMBER_PY_HOME, or init(home=...), overrides on purpose.
+    """
+    env = os.environ.get("AMBER_PY_HOME")
     if env and os.path.isfile(os.path.join(env, "amber.k")):
         return env
     bundled = _bundled_home()
     if bundled:
         return bundled
+    env = os.environ.get("AMBER_HOME")
+    if env and os.path.isfile(os.path.join(env, "amber.k")):
+        return env
     # A developer checkout sitting next to this one, or the current directory --
     # the two places someone hacking on the engine actually runs from.
     for candidate in (os.getcwd(),
@@ -125,9 +136,9 @@ def init(home: str | None = None, *, bare: bool = False) -> None:
     """Boot the engine. Called automatically on first use; call it yourself only
     to choose a different ``home`` or to boot ``bare``.
 
-    ``home``  directory holding the ``.k`` standard library. ``None`` searches
-              ``$AMBER_HOME``, then the copy bundled in the wheel, then the
-              working directory.
+    ``home``  directory holding the ``.k`` standard library. ``None`` takes
+              ``$AMBER_PY_HOME``, then the copy bundled with the engine, then
+              ``$AMBER_HOME``, then the working directory.
     ``bare``  skip the standard library entirely: primitives only. Faster to
               start and useful when you are embedding Amber as a kernel rather
               than using it as an analytics language.

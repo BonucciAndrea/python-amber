@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amber-lang"
-version = "2.9.2"
+version = "2.9.3"
 description = "The Amber columnar time-series engine, in process, with zero-copy NumPy/Arrow/pandas interop"
 readme = "README.md"
 requires-python = ">=3.10"
