@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # The engine release this package is built and tested against
+  ENGINE_REF: v2.9.0
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.10', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: BonucciAndrea/amber
+          ref: ${{ env.ENGINE_REF }}
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Vendor the engine
+        run: bash scripts/vendor_engine.sh engine && rm -rf engine
+      - name: Install (builds the engine from vendor/amber)
+        run: python -m pip install -v ".[test]" polars
+      - name: Tests against the installed package
+        run: |
+          mkdir -p /tmp/t && cp -r tests /tmp/t/ && cd /tmp/t
+          python -c "import amber; amber.init(); print(amber.__file__, amber.version(), amber.home())"
+          python -m pytest tests -q -p no:cacheprovider
+      - name: Command line
+        run: amber-py -c "select sum a from ([]a:1 2 3)"
+
+  sdist:
+    name: sdist builds anywhere
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: BonucciAndrea/amber
+          ref: ${{ env.ENGINE_REF }}
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: bash scripts/vendor_engine.sh engine && rm -rf engine
+      - run: python -m pip install build && python -m build --sdist
+      - name: No binaries inside
+        run: "! tar tzf dist/*.tar.gz | grep -E '\\.(so|o|dylib)$'"
+      - name: Install from the sdist alone, in an empty directory
+        run: |
+          cd /tmp && python -m pip install "$GITHUB_WORKSPACE"/dist/*.tar.gz pytest hypothesis numpy pandas pyarrow
+          cp -r "$GITHUB_WORKSPACE"/tests . && python -m pytest tests -q -p no:cacheprovider

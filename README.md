@@ -42,8 +42,13 @@ True
 ## Install
 
 ```bash
-pip install amber
+pip install amber-lang
 ```
+
+The import is still `import amber` (the plain `amber` name on PyPI was already taken).
+Wheels exist for Linux x86_64 and aarch64 and for Apple silicon Macs, on CPython
+3.10 to 3.14. Anywhere else pip builds from the sdist, which carries the engine's
+source, so all you need is a C compiler and bash.
 
 A binary wheel carries `libamber.so` **and** the eight `.k` standard-library
 modules, so this is genuinely all you need — no engine checkout, no
@@ -149,12 +154,13 @@ am.set("book", {"sym": ["AAPL", "MSFT"], "px": [187.2, 411.1]})
 |---|---|
 | `am.init(home=None, *, bare=False)` | Boot the engine. Automatic on first use. `bare=True` skips the `.k` standard library. |
 | `am.eval(src, *, raw=False)` | Evaluate Amber source; returns the last statement's value. |
-| `am.q(line, *, raw=False)` | Evaluate one line **after the bare-qSQL rewrite** — `select … from …` works verbatim. |
+| `am.q(line, *, raw=False)` | Evaluate **after the bare-qSQL rewrite** — `select … from …` works verbatim. Text over several lines is read the way a script is, so a query can carry on over indented lines. |
 | `am.call(name, *args, raw=False)` | Apply a global function to 0–8 native arguments (no string round-trip). |
 | `am.get(name)` / `am.set(name, obj)` | Read / bind an Amber global. |
 | `am.make_table({name: seq, …})` | Build a table from Python columns. |
-| `am.load(path)` | Load a `.k` script, as `\l` does in the REPL. |
+| `am.load(path)` | Load a `.k`/`.q` script or a database directory, exactly as `\l` does. |
 | `am.convert(obj)` | Python object → `Value`. |
+| `am.as_array(v)` | The raw zero-copy NumPy view of a vector (temporal ones as their plain numbers). |
 | `am.plugin_load(path)` | `dlopen` a native Amber plugin. |
 | `am.diagnostics(bool)` | Re-enable the engine's rich stderr diagnostics (off by default here). |
 | `am.<anything>` | A `Verb` bound to that Amber global. |
@@ -172,7 +178,12 @@ zero-copy and all keep the engine value alive for exactly as long as they exist.
 `.type()` `.type_name()` `.count()` `.is_table()` `.is_dict()` `.is_atom()`
 `.flatten()` `.format(plain=True)` `.to_str()` `.to_symbols()` `.scalar()`
 `.ncols()` `.colname(i)` `.column(i)` `.keys()` `.values()` `.items()`
-`.handle()`
+`.symbol_codes()` `.equals(v)` `.to_bytes()` `.release()` `.is_released()` `.handle()`
+
+Values pickle (through the engine's own serialiser), so they cross
+`multiprocessing` fine. `.release()` hands the memory back right away instead of
+waiting for the GC, and it says no while a NumPy view of it is still alive.
+Everything else on a released value raises instead of crashing.
 
 ### `am.Table`
 
@@ -181,12 +192,15 @@ zero-copy and all keep the engine value alive for exactly as long as they exist.
 | `t.columns` | Column names. |
 | `t.key_columns` | Grouping columns of a keyed (`by`) result. |
 | `t[name]` / `t.column(name, raw=…)` | One column. |
-| `t.to_pandas(copy=False, index=True)` | DataFrame; key columns become the index. |
+| `t.shape` / `t.dtypes` / `t.head(n)` / `t.tail(n)` | The usual. |
+| `t.to_pandas(copy=False, index=True, categorical=False)` | DataFrame; key columns become the index. `categorical=True` gives symbol columns as `pandas.Categorical` straight from the engine's ids. |
 | `t.to_arrow()` | `pyarrow.Table`, zero-copy for numerics. |
 | `t.to_polars()` | `polars.DataFrame`, via Arrow. |
 | `t.to_dict()` | Plain Python (always copies). |
-| `am.Table.from_pandas(df, index=False)` | Import a DataFrame. |
-| `am.Table.from_arrow(at)` | Import a `pyarrow.Table` or `RecordBatch`. |
+| `t.to_numpy()` | One 2-D array (a copy). |
+| `am.Table.from_pandas(df, index=False, strings="symbol")` | Import a DataFrame. Nullable `Int64`/`Float64`/`boolean`, categoricals and tz-aware datetimes all work. |
+| `am.Table.from_arrow(x)` | Import a `pyarrow.Table`, `RecordBatch`, `RecordBatchReader` or anything with `__arrow_c_stream__`. Sliced and chunked data, dictionaries, decimals and every temporal type are fine; nested types say no clearly. |
+| `am.Table.from_polars(df)` | Import a `polars.DataFrame`. |
 
 ### A REPL
 
@@ -244,7 +258,13 @@ to take a deliberate snapshot and stop pinning the engine's buffers.
 | symbol vector | `list[str]` | interned int32 ids resolved through the engine's symbol table |
 | byte / short / int / long vector | `numpy.ndarray` | **zero-copy**, dtype `int8`/`int16`/`int32`/`int64` |
 | float vector | `numpy.ndarray` `float64` | **zero-copy** |
-| bool vector | `numpy.ndarray` | bit-packed in the engine, widened by it on the way out |
+| bool vector | `numpy.ndarray` `bool` | rare: `101b` is a byte vector in Amber, and comes back as `int8` |
+| date vector | `numpy.ndarray` `datetime64[D]` | copied once, to move the epoch |
+| month vector | `datetime64[M]` | |
+| timestamp vector | `datetime64[ns]` | |
+| timespan vector | `timedelta64[ns]` | **zero-copy**, nothing to shift |
+| time / second / minute vector | `timedelta64[ms]` / `[s]` / `[m]` | time of day, as a span since midnight |
+| temporal atoms | `numpy.datetime64` / `timedelta64` | `datetime`/`timedelta` without NumPy |
 | lazy range (`!n`) | `numpy.ndarray` | materialised first |
 | general list | `list` | recursive |
 | dict | `dict` | |
@@ -259,12 +279,15 @@ concerned. The arrays you get back carry the true dtype rather than being
 widened behind your back; `arr.astype("int64")` is one call away when you want
 uniformity, and it should be your call.
 
+Nulls (`0Nd`, `0Np`, …) come back as `NaT`, and `NaT` goes in as the null.
+
 Going the other way, `Table.from_pandas` maps object/string columns to **symbol**
 vectors (four bytes a row, integer comparisons — the reason Amber groups and
-joins fast on `sym`) and datetime64 columns to int64 nanoseconds **without
-re-basing the epoch**, since Amber's own timestamps count from 2000.01.01 and
-silently shifting your data by thirty years would be worse than leaving it
-where pandas had it.
+joins fast on `sym`). Datetimes become real Amber timestamps, timedeltas
+timespans: Amber counts from 2000.01.01 and NumPy from 1970, and the move between
+the two happens here, so a timestamp never comes out thirty years off.
+`datetime`, `date`, `time` and `timedelta` objects convert the same way, and an
+aware `datetime` goes in as UTC.
 
 ---
 
@@ -297,8 +320,8 @@ AMBER_HOME=/path/to/amber python -m pytest tests -q
 `setup.py` looks for the engine in this order:
 
 1. `$AMBER_LIB_DIR` — a directory containing a prebuilt `libamber.so`
-2. `$AMBER_SRC` — an engine checkout; runs its own `./build.sh --shared`
-3. `vendor/amber/` — a vendored checkout or git submodule
+2. `$AMBER_SRC` — an engine checkout; runs its own `./build.sh --shared-only`
+3. `vendor/amber/` — what `scripts/vendor_engine.sh` writes, and what the sdist ships
 4. `../amber/` — a sibling checkout
 5. the system library path
 
@@ -325,6 +348,11 @@ scripts/build_wheel.sh                    # a local wheel with the engine bundle
 scripts/build_wheel.sh --manylinux        # auditwheel-repaired, redistributable
 ```
 
+Releases are built by `.github/workflows/wheels.yml` with cibuildwheel: push a
+`v*` tag and it builds the sdist and every wheel, tests each one after
+installing it, and publishes to PyPI with trusted publishing (no token in the
+repo).
+
 The plain build copies `libamber.so` into `amber/` and links the extension with
 an `$ORIGIN` rpath, so the library is found next to the extension wherever the
 wheel lands. `auditwheel repair` then does the rest of what a redistributable
@@ -346,6 +374,11 @@ would be intermittent, timing-dependent and effectively unattributable — the
 worst possible failure mode in exchange for parallelism you can get safely
 another way. If you need concurrency, use several Amber **processes**, which is
 what the engine's own `peach` does (fork-based, copy-on-write, no shared heap).
+
+Two things that follow from this. Ctrl-C can't stop a long engine call halfway:
+Python sees the `KeyboardInterrupt` as soon as the call returns. And on a
+free-threaded Python (3.13t, 3.14t) importing the module turns the GIL back on,
+on purpose.
 
 ---
 

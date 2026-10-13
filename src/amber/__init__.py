@@ -39,17 +39,20 @@ from . import _amber
 from ._amber import AmberError, Value  # noqa: F401  (re-exported)
 
 from .table import Table
-from .convert import to_python, VECTOR_DTYPES
+from .convert import to_python, as_array, VECTOR_DTYPES, _to_amber_hook
+
+# dates, times and pandas' nullable columns: the C converter's fallback (convert.py)
+_amber._set_convert_hook(_to_amber_hook)
 
 __all__ = [
     "AmberError", "Value", "Table",
     "init", "home", "version", "abi",
     "eval", "q", "call", "get", "set", "delete", "globals_",
-    "convert", "to_python", "make_table", "load", "plugin_load",
+    "convert", "to_python", "as_array", "make_table", "load", "plugin_load",
     "diagnostics", "shutdown",
 ]
 
-__version__ = "1.9.6"
+__version__ = "2.9.0"
 
 # --------------------------------------------------------------------------
 # boot
@@ -116,13 +119,20 @@ def _ensure() -> None:
         init()
 
 
+def _unpickle(data: bytes) -> Value:
+    """What a pickled Value calls to come back: boots the engine if this process
+    has not yet, then reads the engine's own serialisation."""
+    _ensure()
+    return _amber.from_bytes(data)
+
+
 def home() -> str | None:
     """The directory the standard library was loaded from, or None if bare."""
     return _HOME
 
 
 def version() -> str:
-    """The engine version, e.g. ``'2.0.0'``."""
+    """The engine version, e.g. ``'2.9.0'``."""
     return _amber.version()
 
 
@@ -158,6 +168,8 @@ def eval(src: str, *, raw: bool = False):          # noqa: A001 (shadowing is th
     anything.
     """
     _ensure()
+    if not isinstance(src, str):
+        raise TypeError(f"amber.eval: expected str source, got {type(src).__name__}")
     value = _amber.eval(src)
     return value if raw else to_python(value)
 
@@ -172,9 +184,19 @@ def q(line: str, *, raw: bool = False):
     not see. This is the entry point that applies it, so a query you can type
     at the ``amber>`` prompt is a query you can pass here. Plain expressions
     pass through untouched, so ``q`` is always safe to use.
+
+    Text over several lines is rewritten the way a script is (``qrwf``): a query
+    may run over indented continuation lines, as in q, and the value is the last
+    statement's.
     """
     _ensure()
-    value = _amber.eval_qsql(line)
+    if not isinstance(line, str):
+        raise TypeError(f"amber.q: expected str, got {type(line).__name__}")
+    if "\n" in line.strip("\n") and _HOME is not None:
+        src = to_python(_amber.call("qrwf", (line,)))
+        value = _amber.eval(src if isinstance(src, str) else line)
+    else:
+        value = _amber.eval_qsql(line.strip("\n"))
     return value if raw else to_python(value)
 
 
@@ -253,15 +275,23 @@ def globals_() -> list[str]:
 def make_table(columns: dict[str, Any]) -> Table:
     """Build an Amber table from a mapping of column name to sequence."""
     _ensure()
-    value = _amber.make_table(list(columns.keys()), list(columns.values()))
-    return Table(value)
+    if not isinstance(columns, dict):
+        raise TypeError("amber.make_table: expected a dict of column name -> sequence")
+    return Table.from_dict(columns)
 
 
-def load(path: str) -> None:
-    """Load a ``.k`` script into the engine, as ``\\l path`` does in the REPL."""
+def load(path) -> None:
+    """Load a script (``.k`` or ``.q``) or a database directory into the engine,
+    exactly as ``\\l path`` does: through the engine's own loader, so bare qSQL,
+    queries over several lines and CRLF files all behave as they do at the
+    prompt."""
     _ensure()
-    escaped = path.replace("\\", "\\\\").replace('"', '\\"')
-    _amber.eval('.[{. `c$1:x};,"%s";{\'x}]' % escaped)
+    path = os.fspath(path)
+    if "\n" in path or "\r" in path or "\0" in path:
+        raise ValueError("amber.load: a path cannot hold a newline or NUL")
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+    _amber.eval("\\l " + path)
 
 
 def plugin_load(path: str) -> None:

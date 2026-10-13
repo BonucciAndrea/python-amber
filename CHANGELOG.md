@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.9.0
+
+- **`pip install amber-lang`**: it's on PyPI now, still `import amber`. Wheels for Linux (x86_64, aarch64) and
+  Apple silicon on Python 3.10 to 3.14, and the sdist carries the engine's source, so it builds anywhere with a C
+  compiler. Releases go out from a tag, through trusted publishing.
+- **Amber 2.9's temporals**: dates, months, timestamps, timespans, times, seconds and minutes come back as
+  `datetime64`/`timedelta64` with the epoch moved right (Amber counts from 2000, NumPy from 1970) and nulls as `NaT`.
+  Timespans stay zero-copy. `datetime`, `date`, `time`, `timedelta`, NumPy and pandas datetimes go in as the real
+  thing, aware ones as UTC. They used to go in as plain nanosecond numbers.
+- **Arrow both ways, properly**: `from_arrow` takes sliced and chunked tables, readers, dictionaries, decimals, every
+  int width, bools with nulls and every temporal type. Things it can't hold (nested, binary, a uint64 past the int64
+  range) say so, they used to read garbage. `to_arrow` gives temporal columns their Arrow types and bytes as `int8`.
+- **pandas**: nullable `Int64`/`Float64`/`boolean`, categoricals and tz-aware columns import, duplicate column names
+  are an error, and `to_pandas(categorical=True)` gives symbols as a `Categorical` straight from the engine's ids.
+- **Sturdier values**: `release()`, `equals()`, pickling, `symbol_codes()`. A released value raises instead of
+  crashing, views can't be written through, and every NumPy view keeps its value alive.
+- **Conversions in**: big-endian, strided, `float16` and unsigned buffers, NumPy scalars, and ints past int64 are
+  an `OverflowError`, they used to wrap.
+- `am.q` takes a query over several lines, `am.load` loads `.q` scripts and databases as `\l` does, and
+  `Table` got `head`, `tail`, `dtypes`, `to_numpy` and `from_polars`.
+- 255 tests, up from 30: Hypothesis round trips, leak and thread checks, and the CLI.
+
 ## 1.9.6 — first release
 
 The Amber engine in your Python process, with zero-copy NumPy, pandas and Arrow interop.

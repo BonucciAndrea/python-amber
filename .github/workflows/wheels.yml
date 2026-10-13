@@ -1,0 +1,83 @@
+name: wheels
+
+# Builds the sdist and the wheels on every v* tag (and by hand), tests every
+# wheel after install, and publishes to PyPI as amber-lang through trusted
+# publishing: no token lives in this repo. PyPI has to know this workflow first
+# (pypi.org > amber-lang > Publishing: owner BonucciAndrea, repo python-amber,
+# workflow wheels.yml, environment pypi).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  ENGINE_REF: v2.9.0
+
+jobs:
+  sdist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: BonucciAndrea/amber
+          ref: ${{ env.ENGINE_REF }}
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: bash scripts/vendor_engine.sh engine && rm -rf engine
+      - run: python -m pip install build && python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  wheels:
+    name: wheels / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86_64 + aarch64 Linux on native runners, Apple silicon macOS. Intel
+        # Macs install from the sdist (it builds with the system clang).
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: BonucciAndrea/amber
+          ref: ${{ env.ENGINE_REF }}
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: bash scripts/vendor_engine.sh engine && rm -rf engine
+      - run: python -m pip install cibuildwheel
+      - run: python -m cibuildwheel --output-dir wheelhouse
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  publish:
+    needs: [sdist, wheels]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/amber-lang
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -3,7 +3,8 @@ import pytest
 
 
 def test_version_and_abi(am):
-    assert am.version().startswith("1.")
+    major, minor = (int(x) for x in am.version().split(".")[:2])
+    assert (major, minor) >= (2, 9)
     assert am.abi() >= 1
 
 
@@ -43,7 +44,7 @@ def test_lazy_range_is_materialised(am):
 def test_errors_are_exceptions(am):
     with pytest.raises(am.AmberError) as excinfo:
         am.eval("noSuchNameAtAll+1")
-    assert "value" in str(excinfo.value)
+    assert "noSuchNameAtAll" in str(excinfo.value)
     # ... and the engine is still usable afterwards
     assert am.eval("1+1") == 2
 

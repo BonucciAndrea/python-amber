@@ -1,0 +1,11 @@
+build/
+dist/
+*.egg-info/
+vendor/
+wheelhouse/
+src/amber/*.so
+src/amber/*.dylib
+src/amber/kmodules/
+__pycache__/
+.hypothesis/
+.pytest_cache/

@@ -43,10 +43,17 @@
  *
  * Amber - GNU AGPLv3 - see LICENSE and NOTICE.
  */
+#ifndef PY_SSIZE_T_CLEAN
 #define PY_SSIZE_T_CLEAN
+#endif
 #include <Python.h>
 
 #include "amber_capi.h"
+
+/* PyFloat_Unpack2 went public in 3.11; 3.10 has it under its old private name */
+#if PY_VERSION_HEX < 0x030B0000
+#define PyFloat_Unpack2(p, le) _PyFloat_Unpack2((const unsigned char *)(p), (le))
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -91,7 +98,7 @@ static PyObject *Value_wrap(amber_value handle) {
 static void Value_dealloc(ValueObject *self) {
     if (self->handle) amber_release(self->handle);
     self->handle = 0;
-    PyObject_Free(self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 /* PEP 3118 format code for an Amber element type, or NULL when the value has no
@@ -101,7 +108,7 @@ static void Value_dealloc(ValueObject *self) {
  * element, see the Tw[] table in the engine's a.h), and PEP 3118 has no
  * sub-byte format. Exposing it as bytes would silently give a consumer an array
  * eight times too short with the wrong values in it. It is converted instead. */
-static const char *format_for(int type) {
+static const char *format_for(int type, int bits) {
     switch (type) {
         case AMBER_T_BYTE:  return "b";   /* int8   */
         case AMBER_T_SHORT: return "h";   /* int16  */
@@ -110,6 +117,15 @@ static const char *format_for(int type) {
         case AMBER_T_FLOAT: return "d";   /* float64*/
         case AMBER_T_CHAR:  return "B";   /* uint8; decode with .to_str()     */
         case AMBER_T_SYM:   return "i";   /* int32 symbol ids                 */
+        /* 2.9's typed temporal lists are their raw numbers: days, ms, minutes,
+         * seconds or months as int32, timestamps and timespans as int64 ns. The
+         * buffer is those numbers, zero-copy; amber/convert.py turns them into
+         * datetime64/timedelta64 (which needs the 2000.01.01 epoch shifted, so
+         * a copy, for the absolute kinds). */
+        case AMBER_T_DATE_LIST:   case AMBER_T_TIME_LIST:  case AMBER_T_MINUTE_LIST:
+        case AMBER_T_SECOND_LIST: case AMBER_T_MONTH_LIST:
+        case AMBER_T_TIMESTAMP_LIST: case AMBER_T_TIMESPAN_LIST:
+            return bits == 64 ? "q" : bits == 32 ? "i" : NULL;
         default:            return NULL;
     }
 }
@@ -124,8 +140,13 @@ static int Value_getbuffer(ValueObject *self, Py_buffer *view, int flags) {
         PyErr_SetString(PyExc_BufferError, "NULL view in Value.__buffer__");
         return -1;
     }
+    if (!self->handle) {
+        view->obj = NULL;
+        PyErr_SetString(PyExc_BufferError, "amber.Value has been released");
+        return -1;
+    }
     data = amber_get_vector_ptr(self->handle, &type, &len, &bits);
-    fmt = format_for(type);
+    fmt = format_for(type, bits);
     if (!data || !fmt) {
         view->obj = NULL;
         PyErr_Format(PyExc_BufferError,
@@ -147,21 +168,29 @@ static int Value_getbuffer(ValueObject *self, Py_buffer *view, int flags) {
     view->strides = NULL;
     view->suboffsets = NULL;
     view->internal = NULL;
+    if ((flags & PyBUF_WRITABLE) == PyBUF_WRITABLE) {
+        /* engine memory is shared and never ours to edit: refuse a writable
+         * request outright rather than hand out a view someone will write to */
+        Py_DECREF(self); view->obj = NULL;
+        PyErr_SetString(PyExc_BufferError, "amber.Value buffers are read-only");
+        return -1;
+    }
     if (flags & PyBUF_ND) {
-        self->exports++;
         view->shape = PyMem_New(Py_ssize_t, 1);
-        if (!view->shape) { Py_DECREF(self); self->exports--; return -1; }
+        if (!view->shape) { Py_DECREF(self); view->obj = NULL; PyErr_NoMemory(); return -1; }
         view->shape[0] = (Py_ssize_t)len;
         if ((flags & PyBUF_STRIDES) == PyBUF_STRIDES) {
             view->strides = PyMem_New(Py_ssize_t, 1);
             if (!view->strides) {
-                PyMem_Free(view->shape);
-                Py_DECREF(self); self->exports--;
+                PyMem_Free(view->shape); view->shape = NULL;
+                Py_DECREF(self); view->obj = NULL;
+                PyErr_NoMemory();
                 return -1;
             }
             view->strides[0] = view->itemsize;
         }
     }
+    self->exports++;                     /* every live export, so release() can refuse */
     return 0;
 }
 
@@ -179,30 +208,64 @@ static PyBufferProcs Value_as_buffer = {
 
 /* ---- Value methods ------------------------------------------------------- */
 
+/* Every method goes through this: a Value whose handle was given back with
+ * release() must not reach the engine, which would read a null handle as a
+ * pointer in the calls that do not check for it. */
+static int Value_live(ValueObject *self) {
+    if (self->handle) return 1;
+    PyErr_SetString(PyExc_ValueError, "amber.Value has been released");
+    return 0;
+}
+#define LIVE(self) do { if (!Value_live(self)) return NULL; } while (0)
+
 static PyObject *Value_type(ValueObject *self, PyObject *unused) {
-    (void)unused; return PyLong_FromLong(amber_type(self->handle));
+    (void)unused; LIVE(self); return PyLong_FromLong(amber_type(self->handle));
 }
 static PyObject *Value_type_name(ValueObject *self, PyObject *unused) {
-    (void)unused; return PyUnicode_FromString(amber_type_name(self->handle));
+    (void)unused; LIVE(self); return PyUnicode_FromString(amber_type_name(self->handle));
 }
 static PyObject *Value_count(ValueObject *self, PyObject *unused) {
-    (void)unused; return PyLong_FromLongLong(amber_count(self->handle));
+    (void)unused; LIVE(self); return PyLong_FromLongLong(amber_count(self->handle));
 }
 static PyObject *Value_is_table(ValueObject *self, PyObject *unused) {
-    (void)unused; return PyBool_FromLong(amber_is_table(self->handle));
+    (void)unused; LIVE(self); return PyBool_FromLong(amber_is_table(self->handle));
 }
 static PyObject *Value_is_dict(ValueObject *self, PyObject *unused) {
-    (void)unused; return PyBool_FromLong(amber_is_dict(self->handle));
+    (void)unused; LIVE(self); return PyBool_FromLong(amber_is_dict(self->handle));
 }
 static PyObject *Value_is_atom(ValueObject *self, PyObject *unused) {
-    (void)unused; return PyBool_FromLong(amber_is_atom(self->handle));
+    (void)unused; LIVE(self); return PyBool_FromLong(amber_is_atom(self->handle));
 }
 static PyObject *Value_handle(ValueObject *self, PyObject *unused) {
     (void)unused; return PyLong_FromUnsignedLongLong(self->handle);
 }
+static PyObject *Value_is_released(ValueObject *self, PyObject *unused) {
+    (void)unused; return PyBool_FromLong(self->handle == 0);
+}
+
+/* Give the engine value back now rather than when Python collects the object.
+ * A big intermediate held by a long-lived Value (a notebook cell's result, say)
+ * is otherwise pinned until the garbage collector gets round to it. Refused
+ * while a NumPy array or memoryview still reads the payload: that view's memory
+ * is the engine's, and freeing it under the view is exactly the bug the buffer
+ * protocol's pinning exists to prevent. Releasing twice is a no-op. */
+static PyObject *Value_release(ValueObject *self, PyObject *unused) {
+    (void)unused;
+    if (!self->handle) Py_RETURN_NONE;
+    if (self->exports > 0) {
+        PyErr_Format(PyExc_BufferError,
+                     "amber.Value.release(): %zd buffer export(s) still reading it "
+                     "(a NumPy array or memoryview); drop them first",
+                     self->exports);
+        return NULL;
+    }
+    amber_release(self->handle);
+    self->handle = 0;
+    Py_RETURN_NONE;
+}
 
 static PyObject *Value_flatten(ValueObject *self, PyObject *unused) {
-    (void)unused; return Value_wrap(amber_flatten(self->handle));
+    (void)unused; LIVE(self); return Value_wrap(amber_flatten(self->handle));
 }
 
 static PyObject *Value_format(ValueObject *self, PyObject *args, PyObject *kw) {
@@ -210,6 +273,7 @@ static PyObject *Value_format(ValueObject *self, PyObject *args, PyObject *kw) {
     int plain = 1;
     char *text;
     PyObject *res;
+    LIVE(self);
     if (!PyArg_ParseTupleAndKeywords(args, kw, "|p", kwlist, &plain)) return NULL;
     text = plain ? amber_format_plain(self->handle) : amber_format(self->handle);
     if (!text) return amber_raise();
@@ -223,6 +287,7 @@ static PyObject *Value_to_str(ValueObject *self, PyObject *unused) {
     char *buf;
     PyObject *res;
     (void)unused;
+    LIVE(self);
     need = amber_to_string(self->handle, NULL, 0);
     if (need < 0) {
         PyErr_Format(PyExc_TypeError, "amber.Value of type '%s' is not a string",
@@ -239,13 +304,19 @@ static PyObject *Value_to_str(ValueObject *self, PyObject *unused) {
 
 /* Decode a symbol vector (or symbol atom) to Python str objects. Symbols are
  * interned int32 ids in the payload; the text lives in the engine's symbol
- * table, which never moves and is never freed, so this is a pure copy-out. */
+ * table, which never moves and is never freed, so this is a pure copy-out.
+ *
+ * A ticker column repeats a handful of names a million times, so each distinct
+ * id is decoded once and the str object is shared: a dict from id to str, which
+ * turns a million UTF-8 decodes into a few dozen and a million str objects into
+ * a few dozen references. */
 static PyObject *Value_to_symbols(ValueObject *self, PyObject *unused) {
     const void *data;
     int type = 0, bits = 0, ok = 0;
     long long len = 0, i;
-    PyObject *list;
+    PyObject *list, *cache;
     (void)unused;
+    LIVE(self);
 
     if (amber_type(self->handle) == AMBER_T_SYM_ATOM) {
         int id = amber_to_symbol_id(self->handle, &ok);
@@ -253,24 +324,92 @@ static PyObject *Value_to_symbols(ValueObject *self, PyObject *unused) {
         return PyUnicode_FromString(amber_symbol_name(id));
     }
     data = amber_get_vector_ptr(self->handle, &type, &len, &bits);
-    if (!data || type != AMBER_T_SYM) {
+    if (type != AMBER_T_SYM || (!data && len)) {
         PyErr_Format(PyExc_TypeError, "amber.Value of type '%s' is not a symbol vector",
                      amber_type_name(self->handle));
         return NULL;
     }
     list = PyList_New((Py_ssize_t)len);
     if (!list) return NULL;
+    cache = PyDict_New();
+    if (!cache) { Py_DECREF(list); return NULL; }
     for (i = 0; i < len; i++) {
-        PyObject *s = PyUnicode_FromString(amber_symbol_name(((const int *)data)[i]));
-        if (!s) { Py_DECREF(list); return NULL; }
+        int id = ((const int *)data)[i];
+        PyObject *key = PyLong_FromLong(id), *s;
+        if (!key) goto fail;
+        s = PyDict_GetItemWithError(cache, key);         /* borrowed */
+        if (s) Py_INCREF(s);
+        else {
+            if (PyErr_Occurred()) { Py_DECREF(key); goto fail; }
+            s = PyUnicode_DecodeUTF8(amber_symbol_name(id), (Py_ssize_t)strlen(amber_symbol_name(id)), "replace");
+            if (!s || PyDict_SetItem(cache, key, s) < 0) { Py_XDECREF(s); Py_DECREF(key); goto fail; }
+        }
+        Py_DECREF(key);
         PyList_SET_ITEM(list, (Py_ssize_t)i, s);
     }
+    Py_DECREF(cache);
     return list;
+fail:
+    Py_DECREF(cache);
+    Py_DECREF(list);
+    return NULL;
 }
 
-static PyObject *Value_scalar(ValueObject *self, PyObject *unused) {
-    int ok = 0, type = amber_type(self->handle);
+/* The ids of a symbol vector and the distinct names they index, as
+ * (codes, categories): what a pandas Categorical is made of. The codes are
+ * renumbered 0..k-1 in order of first appearance, so they are small and dense
+ * whatever the engine's interned ids are. */
+static PyObject *Value_symbol_codes(ValueObject *self, PyObject *unused) {
+    const void *data;
+    int type = 0, bits = 0;
+    long long len = 0, i;
+    PyObject *codes = NULL, *cats = NULL, *seen = NULL, *res = NULL;
     (void)unused;
+    LIVE(self);
+    data = amber_get_vector_ptr(self->handle, &type, &len, &bits);
+    if (type != AMBER_T_SYM || (!data && len)) {
+        PyErr_Format(PyExc_TypeError, "amber.Value of type '%s' is not a symbol vector",
+                     amber_type_name(self->handle));
+        return NULL;
+    }
+    codes = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)(len * 4));
+    cats = PyList_New(0);
+    seen = PyDict_New();
+    if (!codes || !cats || !seen) goto done;
+    for (i = 0; i < len; i++) {
+        int id = ((const int *)data)[i];
+        PyObject *key = PyLong_FromLong(id), *code;
+        long c;
+        if (!key) goto done;
+        code = PyDict_GetItemWithError(seen, key);
+        if (code) c = PyLong_AsLong(code);
+        else {
+            PyObject *name, *cv;
+            if (PyErr_Occurred()) { Py_DECREF(key); goto done; }
+            c = (long)PyList_GET_SIZE(cats);
+            name = PyUnicode_DecodeUTF8(amber_symbol_name(id), (Py_ssize_t)strlen(amber_symbol_name(id)), "replace");
+            cv = PyLong_FromLong(c);
+            if (!name || !cv || PyList_Append(cats, name) < 0 || PyDict_SetItem(seen, key, cv) < 0) {
+                Py_XDECREF(name); Py_XDECREF(cv); Py_DECREF(key); goto done;
+            }
+            Py_DECREF(name); Py_DECREF(cv);
+        }
+        Py_DECREF(key);
+        ((int *)PyBytes_AS_STRING(codes))[i] = (int)c;
+    }
+    res = Py_BuildValue("(OO)", codes, cats);
+done:
+    Py_XDECREF(codes); Py_XDECREF(cats); Py_XDECREF(seen);
+    return res;
+}
+
+/* An atom as its natural Python scalar. The temporal atoms come back as their
+ * raw numbers (days, ms, ns, ...); amber/convert.py gives them their meaning. */
+static PyObject *Value_scalar(ValueObject *self, PyObject *unused) {
+    int ok = 0, type;
+    (void)unused;
+    LIVE(self);
+    type = amber_type(self->handle);
     switch (type) {
         case AMBER_T_FLOAT_ATOM: {
             double d = amber_to_float(self->handle, &ok);
@@ -281,7 +420,11 @@ static PyObject *Value_scalar(ValueObject *self, PyObject *unused) {
         case AMBER_T_LONG_ATOM:
         case AMBER_T_DATE:
         case AMBER_T_TIME:
-        case AMBER_T_TIMESTAMP: {
+        case AMBER_T_TIMESTAMP:
+        case AMBER_T_MINUTE:
+        case AMBER_T_SECOND:
+        case AMBER_T_MONTH:
+        case AMBER_T_TIMESPAN: {
             long long v = amber_to_int(self->handle, &ok);
             if (!ok) break;
             return PyLong_FromLongLong(v);
@@ -298,40 +441,58 @@ static PyObject *Value_scalar(ValueObject *self, PyObject *unused) {
 }
 
 static PyObject *Value_ncols(ValueObject *self, PyObject *unused) {
-    (void)unused; return PyLong_FromLong(amber_table_ncols(self->handle));
+    (void)unused; LIVE(self); return PyLong_FromLong(amber_table_ncols(self->handle));
 }
 
 static PyObject *Value_colname(ValueObject *self, PyObject *arg) {
-    long col = PyLong_AsLong(arg);
+    long col;
     const char *nm;
+    LIVE(self);
+    col = PyLong_AsLong(arg);
     if (col == -1 && PyErr_Occurred()) return NULL;
+    if (col < 0 || col > 0x7fffffffL) { PyErr_SetString(PyExc_IndexError, "column index out of range"); return NULL; }
     nm = amber_table_colname(self->handle, (int)col);
     if (!nm) { PyErr_SetString(PyExc_IndexError, "column index out of range"); return NULL; }
     return PyUnicode_FromString(nm);
 }
 
 static PyObject *Value_column(ValueObject *self, PyObject *arg) {
-    long col = PyLong_AsLong(arg);
+    long col;
     amber_value c;
+    LIVE(self);
+    col = PyLong_AsLong(arg);
     if (col == -1 && PyErr_Occurred()) return NULL;
+    if (col < 0 || col > 0x7fffffffL) { PyErr_SetString(PyExc_IndexError, "column index out of range"); return NULL; }
     c = amber_table_column(self->handle, (int)col);
     if (!c) { PyErr_SetString(PyExc_IndexError, "column index out of range"); return NULL; }
     return Value_wrap(c);
 }
 
 static PyObject *Value_keys(ValueObject *self, PyObject *unused) {
-    (void)unused; return Value_wrap(amber_dict_keys(self->handle));
+    (void)unused; LIVE(self);
+    if (!amber_is_dict(self->handle)) {
+        PyErr_Format(PyExc_TypeError, "amber.Value of type '%s' is not a dictionary", amber_type_name(self->handle));
+        return NULL;
+    }
+    return Value_wrap(amber_dict_keys(self->handle));
 }
 static PyObject *Value_values(ValueObject *self, PyObject *unused) {
-    (void)unused; return Value_wrap(amber_dict_values(self->handle));
+    (void)unused; LIVE(self);
+    if (!amber_is_dict(self->handle)) {
+        PyErr_Format(PyExc_TypeError, "amber.Value of type '%s' is not a dictionary", amber_type_name(self->handle));
+        return NULL;
+    }
+    return Value_wrap(amber_dict_values(self->handle));
 }
 
 /* Explode a general list (`A) into a Python list of Values. Used for dict
  * values, nested lists and anything else with no flat payload. */
 static PyObject *Value_items(ValueObject *self, PyObject *unused) {
-    long long n = amber_count(self->handle), i;
+    long long n, i;
     PyObject *list;
     (void)unused;
+    LIVE(self);
+    n = amber_count(self->handle);
     if (n < 0) { PyErr_SetString(AmberError, "value has no item count"); return NULL; }
     list = PyList_New((Py_ssize_t)n);
     if (!list) return NULL;
@@ -356,15 +517,83 @@ static PyObject *Value_items(ValueObject *self, PyObject *unused) {
     return list;
 }
 
+/* Match, the engine's own `~`: same type, same shape, same values. Exposed as a
+ * method rather than as __eq__ on purpose -- __eq__ would also have to define
+ * __hash__ consistently, and an engine call per hash is not something dict and
+ * set lookups should pay. */
+static PyObject *Value_equals(ValueObject *self, PyObject *other) {
+    amber_value args[2], r;
+    long long same;
+    int ok = 0;
+    LIVE(self);
+    if (!PyObject_TypeCheck(other, &ValueType)) {
+        PyErr_SetString(PyExc_TypeError, "amber.Value.equals: expected an amber.Value");
+        return NULL;
+    }
+    if (!Value_live((ValueObject *)other)) return NULL;
+    args[0] = self->handle; args[1] = ((ValueObject *)other)->handle;
+    r = amber_call("pyamber.match", args, 2);
+    if (!r) return amber_raise();
+    same = amber_to_int(r, &ok);
+    amber_release(r);
+    if (!ok) return amber_raise();
+    return PyBool_FromLong(same != 0);
+}
+
+/* Pickling, so a Value can cross a multiprocessing queue or sit in a cache: the
+ * engine's own serialiser (`ser, the compact format peach ships between
+ * threads) gives the bytes, and _from_bytes reads them back. Both ends must be
+ * the same Amber version, as with any binary format. */
+static PyObject *Value_to_bytes(ValueObject *self, PyObject *unused) {
+    amber_value r;
+    long long n;
+    char *buf;
+    PyObject *res;
+    (void)unused;
+    LIVE(self);
+    r = amber_call("pyamber.ser", &self->handle, 1);
+    if (!r) return amber_raise();
+    n = amber_to_string(r, NULL, 0);
+    if (n < 0) { amber_release(r); PyErr_SetString(AmberError, "amber: `ser gave no bytes"); return NULL; }
+    buf = (char *)PyMem_Malloc((size_t)n + 1);
+    if (!buf) { amber_release(r); return PyErr_NoMemory(); }
+    amber_to_string(r, buf, n + 1);
+    amber_release(r);
+    res = PyBytes_FromStringAndSize(buf, (Py_ssize_t)n);
+    PyMem_Free(buf);
+    return res;
+}
+
+static PyObject *Value_reduce(ValueObject *self, PyObject *unused) {
+    PyObject *bytes, *mod, *fn, *res;
+    (void)unused;
+    bytes = Value_to_bytes(self, NULL);
+    if (!bytes) return NULL;
+    /* amber._unpickle, not _amber.from_bytes: it boots the engine first, which a
+     * fresh process (multiprocessing, a worker pool) has not done yet */
+    mod = PyImport_ImportModule("amber");
+    fn = mod ? PyObject_GetAttrString(mod, "_unpickle") : NULL;
+    Py_XDECREF(mod);
+    if (!fn) { Py_DECREF(bytes); return NULL; }
+    res = Py_BuildValue("(O(O))", fn, bytes);
+    Py_DECREF(fn);
+    Py_DECREF(bytes);
+    return res;
+}
+
 static Py_ssize_t Value_length(ValueObject *self) {
-    long long n = amber_count(self->handle);
+    long long n;
+    if (!Value_live(self)) return -1;
+    n = amber_count(self->handle);
     return n < 0 ? 0 : (Py_ssize_t)n;
 }
 
 static PyObject *Value_repr(ValueObject *self) {
-    char *text = amber_format_plain(self->handle);
+    char *text;
     PyObject *res;
-    if (!text) return PyUnicode_FromFormat("<amber.Value %s>", amber_type_name(self->handle));
+    if (!self->handle) return PyUnicode_FromString("<amber.Value released>");
+    text = amber_format_plain(self->handle);
+    if (!text) { PyErr_Clear(); return PyUnicode_FromFormat("<amber.Value %s>", amber_type_name(self->handle)); }
     res = PyUnicode_FromFormat("<amber.Value %s>\n%s", amber_type_name(self->handle), text);
     amber_free(text);
     return res;
@@ -377,18 +606,24 @@ static PyMethodDef Value_methods[] = {
     { "is_table",   (PyCFunction)Value_is_table,   METH_NOARGS,  "True if this is an Amber table." },
     { "is_dict",    (PyCFunction)Value_is_dict,    METH_NOARGS,  "True if this is an Amber dictionary." },
     { "is_atom",    (PyCFunction)Value_is_atom,    METH_NOARGS,  "True if this is a scalar atom." },
-    { "handle",     (PyCFunction)Value_handle,     METH_NOARGS,  "The raw 64-bit engine handle (diagnostics only)." },
+    { "handle",     (PyCFunction)Value_handle,     METH_NOARGS,  "The raw 64-bit engine handle (diagnostics only; 0 once released)." },
+    { "release",    (PyCFunction)Value_release,    METH_NOARGS,  "Give the engine value back now. Refused while a buffer export is alive; idempotent." },
+    { "is_released",(PyCFunction)Value_is_released,METH_NOARGS,  "True once release() has run." },
     { "flatten",    (PyCFunction)Value_flatten,    METH_NOARGS,  "Materialise a lazy range; identity otherwise." },
     { "format",     (PyCFunction)Value_format,     METH_VARARGS | METH_KEYWORDS, "Render as the REPL would. format(plain=True) strips ANSI colour." },
     { "to_str",     (PyCFunction)Value_to_str,     METH_NOARGS,  "Decode a char vector to str." },
     { "to_symbols", (PyCFunction)Value_to_symbols, METH_NOARGS,  "Decode a symbol vector to a list of str." },
-    { "scalar",     (PyCFunction)Value_scalar,     METH_NOARGS,  "Convert an atom to the natural Python scalar." },
+    { "symbol_codes",(PyCFunction)Value_symbol_codes,METH_NOARGS, "(int32 codes as bytes, distinct names) of a symbol vector: a categorical." },
+    { "scalar",     (PyCFunction)Value_scalar,     METH_NOARGS,  "Convert an atom to the natural Python scalar (temporal atoms: their raw number)." },
     { "ncols",      (PyCFunction)Value_ncols,      METH_NOARGS,  "Column count of a table, or -1." },
     { "colname",    (PyCFunction)Value_colname,    METH_O,       "Name of column i." },
     { "column",     (PyCFunction)Value_column,     METH_O,       "Column i as a Value (flattened)." },
     { "keys",       (PyCFunction)Value_keys,       METH_NOARGS,  "Dictionary keys as a Value." },
     { "values",     (PyCFunction)Value_values,     METH_NOARGS,  "Dictionary values as a Value." },
     { "items",      (PyCFunction)Value_items,      METH_NOARGS,  "Explode a general list into a list of Values." },
+    { "equals",     (PyCFunction)Value_equals,     METH_O,       "Engine match (`~`): same type, shape and values." },
+    { "to_bytes",   (PyCFunction)Value_to_bytes,   METH_NOARGS,  "The engine's own serialisation (`ser) of this value." },
+    { "__reduce__", (PyCFunction)Value_reduce,     METH_NOARGS,  "Pickle support, through to_bytes()/from_bytes()." },
     { NULL, NULL, 0, NULL }
 };
 
@@ -403,6 +638,7 @@ static PyTypeObject ValueType = {
     .tp_as_sequence = &Value_as_sequence,
     .tp_as_buffer = &Value_as_buffer,
     .tp_flags     = Py_TPFLAGS_DEFAULT,
+    .tp_free      = PyObject_Free,
     .tp_doc       = "An owned handle on a value inside the Amber engine.\n\n"
                     "Flat vectors export the PEP 3118 buffer protocol, so\n"
                     "numpy.asarray(v), memoryview(v) and pyarrow.py_buffer(v)\n"
@@ -417,17 +653,46 @@ static PyTypeObject ValueType = {
 
 static amber_value to_amber(PyObject *obj);   /* forward */
 
+/* A Python function amber/convert.py registers at import: called for an object
+ * none of the C rules below cover, it returns a Value for anything date- or
+ * time-like (datetime, numpy datetime64 arrays, pandas timestamps and nullable
+ * columns) and None to let the C side carry on. Keeping that knowledge in
+ * Python keeps the datetime and NumPy C APIs out of this file. */
+static PyObject *convert_hook;
+
 /* Convert a PEP 3118 buffer (a NumPy array, an array.array, another Value, a
  * memoryview) into an Amber vector. This is a COPY: Amber stores its own
  * 32-byte object header immediately before every payload, so it cannot adopt a
  * foreign allocation as a native vector. (The reverse direction -- Amber to
- * NumPy -- IS zero-copy, which is the direction that carries the volume.) */
+ * NumPy -- IS zero-copy, which is the direction that carries the volume.)
+ *
+ * The common case -- a contiguous, native-endian float64, int64 or int32
+ * array -- goes straight to amber_from_*() with no temporary. Everything else
+ * (a strided view such as a[::2], a big-endian '>i4', unsigned ints, float32
+ * or float16, booleans) is read element by element into an int64, float64 or
+ * byte temporary. Unsigned 64-bit values past int64's range are refused rather
+ * than wrapped to negatives.
+ *
+ * Returns 0 with an exception set on a real error, and 0 with NO exception
+ * when the object has no buffer at all (the caller then tries the sequence
+ * path). */
+static int native_little(void) { const unsigned short one = 1; return *(const unsigned char *)&one == 1; }
+
+static void load_swapped(unsigned char *dst, const unsigned char *src, Py_ssize_t size, int swap) {
+    Py_ssize_t k;
+    if (!swap) { memcpy(dst, src, (size_t)size); return; }
+    for (k = 0; k < size; k++) dst[k] = src[size - 1 - k];
+}
+
 static amber_value buffer_to_amber(PyObject *obj) {
     Py_buffer view;
     amber_value res = 0;
-    Py_ssize_t i, n;
+    Py_ssize_t i, n, stride, size;
+    char order = '@', code;
+    const char *fmt;
+    int swap, contiguous;
 
-    if (PyObject_GetBuffer(obj, &view, PyBUF_FORMAT | PyBUF_ANY_CONTIGUOUS) != 0) {
+    if (PyObject_GetBuffer(obj, &view, PyBUF_FORMAT | PyBUF_STRIDES) != 0) {
         PyErr_Clear();
         return 0;
     }
@@ -438,60 +703,104 @@ static amber_value buffer_to_amber(PyObject *obj) {
                         "(ravel() or pass a list of vectors)");
         return 0;
     }
-    n = view.itemsize ? view.len / view.itemsize : 0;
+    size = view.itemsize ? view.itemsize : 1;
+    n = view.ndim == 0 ? 1 : (view.shape ? view.shape[0] : view.len / size);
+    stride = (view.ndim == 1 && view.strides) ? view.strides[0] : size;
+    contiguous = (stride == size);
 
-    if (!view.format) {                    /* untyped bytes */
-        res = amber_from_bytes((const char *)view.buf, (long long)view.len);
-    } else {
-        char code = view.format[0];
-        if (code == '@' || code == '=' || code == '<' || code == '>' || code == '!') code = view.format[1];
-        switch (code) {
-            case 'd': res = amber_from_float64((const double *)view.buf, (long long)n); break;
-            case 'q': case 'Q':
-                res = amber_from_int64((const long long *)view.buf, (long long)n); break;
-            case 'l': case 'L':
-                res = (sizeof(long) == 8)
-                    ? amber_from_int64((const long long *)view.buf, (long long)n)
-                    : amber_from_int32((const int *)view.buf, (long long)n);
-                break;
-            case 'i': case 'I': res = amber_from_int32((const int *)view.buf, (long long)n); break;
-            case 'c': case 'B': case 's':
-                res = amber_from_bytes((const char *)view.buf, (long long)view.len); break;
-            case 'f': {                    /* float32 -> widen to Amber's float64 */
-                double *tmp = (double *)PyMem_Malloc((size_t)n * sizeof(double) + 1);
-                if (!tmp) { PyBuffer_Release(&view); PyErr_NoMemory(); return 0; }
-                for (i = 0; i < n; i++) tmp[i] = (double)((const float *)view.buf)[i];
-                res = amber_from_float64(tmp, (long long)n);
-                PyMem_Free(tmp);
-                break;
-            }
-            case 'b': case 'h': case 'H': { /* narrow ints -> widen to int64 */
-                long long *tmp = (long long *)PyMem_Malloc((size_t)n * sizeof(long long) + 1);
-                if (!tmp) { PyBuffer_Release(&view); PyErr_NoMemory(); return 0; }
-                for (i = 0; i < n; i++)
-                    tmp[i] = (code == 'b') ? (long long)((const signed char *)view.buf)[i]
-                           : (code == 'h') ? (long long)((const short *)view.buf)[i]
-                                           : (long long)((const unsigned short *)view.buf)[i];
-                res = amber_from_int64(tmp, (long long)n);
-                PyMem_Free(tmp);
-                break;
-            }
-            case '?': {                     /* bool -> 0/1 int64 */
-                long long *tmp = (long long *)PyMem_Malloc((size_t)n * sizeof(long long) + 1);
-                if (!tmp) { PyBuffer_Release(&view); PyErr_NoMemory(); return 0; }
-                for (i = 0; i < n; i++) tmp[i] = ((const unsigned char *)view.buf)[i] ? 1 : 0;
-                res = amber_from_int64(tmp, (long long)n);
-                PyMem_Free(tmp);
-                break;
-            }
-            default:
-                PyBuffer_Release(&view);
-                PyErr_Format(PyExc_TypeError,
-                             "amber: buffer format '%s' has no Amber equivalent", view.format);
-                return 0;
-        }
+    fmt = view.format ? view.format : "B";
+    if (*fmt == '@' || *fmt == '=' || *fmt == '<' || *fmt == '>' || *fmt == '!') order = *fmt++;
+    code = *fmt;
+    if (!code || fmt[1]) {
+        PyBuffer_Release(&view);
+        PyErr_Format(PyExc_TypeError, "amber: buffer format '%s' has no Amber equivalent",
+                     view.format ? view.format : "?");
+        return 0;
     }
+    swap = (order == '>' || order == '!') ? native_little() : (order == '<' ? !native_little() : 0);
+
+    /* the fast path: native, contiguous, a type Amber stores as it is */
+    if (contiguous && !swap) {
+        if (code == 'd' && size == 8) { res = amber_from_float64((const double *)view.buf, (long long)n); goto out; }
+        if ((code == 'q' || code == 'l' || code == 'n') && size == 8) { res = amber_from_int64((const long long *)view.buf, (long long)n); goto out; }
+        if ((code == 'i' || code == 'l') && size == 4) { res = amber_from_int32((const int *)view.buf, (long long)n); goto out; }
+        if (code == 'c' || code == 'B' || code == 's') { res = amber_from_bytes((const char *)view.buf, (long long)n); goto out; }
+    }
+
+    switch (code) {
+    case 'c': case 'B': case 's': {                      /* bytes -> a char vector */
+        char *tmp = (char *)PyMem_Malloc((size_t)n + 1);
+        if (!tmp) { PyErr_NoMemory(); goto out; }
+        for (i = 0; i < n; i++) tmp[i] = ((const char *)view.buf)[i * stride];
+        res = amber_from_bytes(tmp, (long long)n);
+        PyMem_Free(tmp);
+        break;
+    }
+    case 'd': case 'f': case 'e': {                      /* floats -> float64 */
+        double *tmp = (double *)PyMem_Malloc((size_t)n * sizeof(double) + 1);
+        if (!tmp) { PyErr_NoMemory(); goto out; }
+        for (i = 0; i < n; i++) {
+            unsigned char raw[8];
+            const unsigned char *src = (const unsigned char *)view.buf + i * stride;
+            if (code == 'e') {
+                /* PyFloat_Unpack2 takes the byte order itself: 1 = little */
+                int le = (order == '<') || ((order == '@' || order == '=') && native_little());
+                tmp[i] = PyFloat_Unpack2((const char *)src, le);
+                if (tmp[i] == -1.0 && PyErr_Occurred()) { PyMem_Free(tmp); goto out; }
+                continue;
+            }
+            load_swapped(raw, src, size, swap);
+            if (code == 'd') { double d; memcpy(&d, raw, 8); tmp[i] = d; }
+            else { float f; memcpy(&f, raw, 4); tmp[i] = (double)f; }
+        }
+        res = amber_from_float64(tmp, (long long)n);
+        PyMem_Free(tmp);
+        break;
+    }
+    case 'b': case 'h': case 'H': case 'i': case 'I': case 'l': case 'L':
+    case 'q': case 'Q': case 'n': case 'N': case '?': {   /* ints -> int64 */
+        int is_unsigned = (code == 'H' || code == 'I' || code == 'L' || code == 'Q' || code == 'N');
+        long long *tmp = (long long *)PyMem_Malloc((size_t)n * sizeof(long long) + 1);
+        if (!tmp) { PyErr_NoMemory(); goto out; }
+        for (i = 0; i < n; i++) {
+            unsigned char raw[8] = {0};
+            const unsigned char *src = (const unsigned char *)view.buf + i * stride;
+            unsigned long long u = 0;
+            long long v = 0;
+            load_swapped(raw, src, size, swap);
+            if (code == '?') { tmp[i] = raw[0] ? 1 : 0; continue; }
+            switch (size) {
+                case 1: if (is_unsigned) u = raw[0]; else v = (signed char)raw[0]; break;
+                case 2: { unsigned short a; short b; memcpy(&a, raw, 2); memcpy(&b, raw, 2); if (is_unsigned) u = a; else v = b; break; }
+                case 4: { unsigned int a; int b; memcpy(&a, raw, 4); memcpy(&b, raw, 4); if (is_unsigned) u = a; else v = b; break; }
+                case 8: { unsigned long long a; long long b; memcpy(&a, raw, 8); memcpy(&b, raw, 8); if (is_unsigned) u = a; else v = b; break; }
+                default:
+                    PyMem_Free(tmp);
+                    PyErr_Format(PyExc_TypeError, "amber: %zd-byte integers have no Amber equivalent", size);
+                    goto out;
+            }
+            if (is_unsigned) {
+                if (u > 0x7fffffffffffffffULL) {
+                    PyMem_Free(tmp);
+                    PyErr_Format(PyExc_OverflowError,
+                                 "amber: unsigned value %llu at index %zd does not fit Amber's int64", u, i);
+                    goto out;
+                }
+                v = (long long)u;
+            }
+            tmp[i] = v;
+        }
+        res = amber_from_int64(tmp, (long long)n);
+        PyMem_Free(tmp);
+        break;
+    }
+    default:
+        PyErr_Format(PyExc_TypeError, "amber: buffer format '%s' has no Amber equivalent", view.format);
+        break;
+    }
+out:
     PyBuffer_Release(&view);
+    if (!res && !PyErr_Occurred()) amber_raise();
     return res;
 }
 
@@ -573,9 +882,27 @@ static amber_value to_amber(PyObject *obj) {
     }
     if (PyBytes_Check(obj))
         return amber_from_bytes(PyBytes_AS_STRING(obj), (long long)PyBytes_GET_SIZE(obj));
-    if (PyDict_Check(obj) || PyMapping_Check(obj)) {
-        if (!PySequence_Check(obj)) return mapping_to_amber(obj);
+    if (convert_hook && !PyList_CheckExact(obj) && !PyTuple_CheckExact(obj) && !PyDict_CheckExact(obj)) {
+        PyObject *r = PyObject_CallFunctionObjArgs(convert_hook, obj, NULL);
+        if (!r) return 0;
+        if (r != Py_None) {
+            amber_value h;
+            if (!PyObject_TypeCheck(r, &ValueType) || !((ValueObject *)r)->handle) {
+                Py_DECREF(r);
+                PyErr_SetString(PyExc_TypeError, "amber: the convert hook must return an amber.Value or None");
+                return 0;
+            }
+            h = amber_retain(((ValueObject *)r)->handle);
+            Py_DECREF(r);
+            return h;
+        }
+        Py_DECREF(r);
     }
+    /* A mapping is something with keys(): PyMapping_Check alone is true for
+     * anything with __getitem__, NumPy scalars included. */
+    if (PyDict_Check(obj) ||
+        (PyMapping_Check(obj) && !PySequence_Check(obj) && PyObject_HasAttrString(obj, "keys")))
+        return mapping_to_amber(obj);
     if (PyObject_CheckBuffer(obj)) {
         amber_value res = buffer_to_amber(obj);
         if (res || PyErr_Occurred()) return res;
@@ -612,7 +939,23 @@ static const char *BOOTSTRAP =
      * library still gets sane `select ... by ...` results. Verified identical
      * to `unkey` (`(unkey x)~pyamber.unkey x` is 1). */
     "pyamber.unkey:{k:+!x;v:+.x;+((!k),(!v))!((.k),(.v))}\n"
-    "pyamber.keycols:{!+!x}\n";
+    "pyamber.keycols:{!+!x}\n"
+    /* match, the engine's own serialiser, and the raw numbers of a temporal
+     * value: C builtins all, so a bare engine has them too */
+    "pyamber.match:{x~y}\n"
+    "pyamber.take:{x#y}\n"
+    "pyamber.ser:{`ser x}\n"
+    "pyamber.des:{`des x}\n"
+    "pyamber.raw:{`i$x}\n"
+    /* the temporal constructors (2.9): raw numbers in, a typed atom or vector
+     * out, 0N giving the kind's null */
+    "pyamber.mkd:{`mkd x}\n"
+    "pyamber.mkt:{`mkt x}\n"
+    "pyamber.mkp:{`mkp x}\n"
+    "pyamber.mku:{`mku x}\n"
+    "pyamber.mkv:{`mkv x}\n"
+    "pyamber.mkm:{`mkm x}\n"
+    "pyamber.mkn:{`mkn x}\n";
 
 static PyObject *py_init(PyObject *self, PyObject *args) {
     const char *home = NULL;
@@ -635,6 +978,18 @@ static PyObject *py_init(PyObject *self, PyObject *args) {
         amber_release(res);
         amber_booted = 1;
     }
+    Py_RETURN_NONE;
+}
+
+static PyObject *py_set_convert_hook(PyObject *self, PyObject *fn) {
+    (void)self;
+    if (fn != Py_None && !PyCallable_Check(fn)) {
+        PyErr_SetString(PyExc_TypeError, "amber._set_convert_hook: expected a callable or None");
+        return NULL;
+    }
+    Py_XDECREF(convert_hook);
+    convert_hook = (fn == Py_None) ? NULL : fn;
+    Py_XINCREF(convert_hook);
     Py_RETURN_NONE;
 }
 
@@ -892,11 +1247,31 @@ done:
     return out;
 }
 
+/* The engine reads its symbol table at whatever id it is given, so only an id
+ * taken from a symbol vector (Value.symbol_codes / its buffer) is meaningful;
+ * a negative one is refused here rather than read before the table's start. */
 static PyObject *py_symbol_name(PyObject *self, PyObject *arg) {
     long id = PyLong_AsLong(arg);
     (void)self;
     if (id == -1 && PyErr_Occurred()) return NULL;
+    if (id < 0 || id > 0x7fffffffL) { PyErr_SetString(PyExc_ValueError, "amber.symbol_name: not a symbol id"); return NULL; }
     return PyUnicode_FromString(amber_symbol_name((int)id));
+}
+
+/* The other half of Value.to_bytes(): bytes from the engine's serialiser back
+ * into a Value. Malformed bytes are the engine's 'domain error, as an
+ * AmberError -- `des checks every length it reads. */
+static PyObject *py_from_bytes(PyObject *self, PyObject *arg) {
+    Py_buffer view;
+    amber_value b, r;
+    (void)self;
+    if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) != 0) return NULL;
+    b = amber_from_bytes((const char *)view.buf, (long long)view.len);
+    PyBuffer_Release(&view);
+    if (!b) return amber_raise();
+    r = amber_call("pyamber.des", &b, 1);
+    amber_release(b);
+    return Value_wrap(r);
 }
 
 static PyMethodDef module_methods[] = {
@@ -918,6 +1293,8 @@ static PyMethodDef module_methods[] = {
     { "plugin_load",     py_plugin_load,     METH_O,       "plugin_load(path) -- dlopen a native Amber plugin." },
     { "symbols",         py_symbols,         METH_O,       "symbols(iterable_of_str) -> Value.  An Amber symbol vector." },
     { "symbol_name",     py_symbol_name,     METH_O,       "symbol_name(id) -> str." },
+    { "from_bytes",      py_from_bytes,      METH_O,       "from_bytes(b) -> Value.  Read back what Value.to_bytes() wrote." },
+    { "_set_convert_hook", py_set_convert_hook, METH_O,    "Internal: the Python fallback for objects the C converter has no rule for." },
     { "free_ptr",        py_free_ptr,        METH_O,       "free_ptr(addr) -- release an engine-allocated struct after Arrow moved its contents out." },
     { NULL, NULL, 0, NULL }
 };
@@ -972,6 +1349,10 @@ PyMODINIT_FUNC PyInit__amber(void) {
     ADDT(AMBER_T_INT_ATOM) ADDT(AMBER_T_LONG_ATOM) ADDT(AMBER_T_FLOAT_ATOM)
     ADDT(AMBER_T_CHAR_ATOM) ADDT(AMBER_T_SYM_ATOM)
     ADDT(AMBER_T_DATE)  ADDT(AMBER_T_TIME)  ADDT(AMBER_T_TIMESTAMP)
+    ADDT(AMBER_T_MINUTE) ADDT(AMBER_T_SECOND) ADDT(AMBER_T_MONTH) ADDT(AMBER_T_TIMESPAN)
+    ADDT(AMBER_T_DATE_LIST) ADDT(AMBER_T_TIME_LIST) ADDT(AMBER_T_TIMESTAMP_LIST)
+    ADDT(AMBER_T_MINUTE_LIST) ADDT(AMBER_T_SECOND_LIST) ADDT(AMBER_T_MONTH_LIST)
+    ADDT(AMBER_T_TIMESPAN_LIST)
     ADDT(AMBER_CAPI_ABI)
 #undef ADDT
     return mod;

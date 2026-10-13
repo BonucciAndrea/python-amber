@@ -82,7 +82,9 @@ def test_from_pandas_dtype_mapping(am):
     t = am.Table.from_pandas(df)
     assert t.columns == ["sym", "ts", "flag", "px"]
     assert list(t["sym"]) == ["AAPL", "MSFT", "AAPL"]     # symbol vector
-    assert t["ts"].dtype == np.int64                       # nanoseconds
+    assert t["ts"].dtype == np.dtype("datetime64[ns]")     # an Amber timestamp column (2.9)
+    assert t.column("ts", raw=True).type_name() == "timestamp vector"
+    assert list(t["ts"]) == list(df["ts"].to_numpy())
     assert list(t["flag"]) == [1, 0, 1]
     am.set("dfin", t.value)
     assert am.eval("`AAPL=first dfin`sym") == 1

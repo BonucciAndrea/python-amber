@@ -8,12 +8,12 @@ are about a shared library that is not written in Python.
 at ``$AMBER_LIB_DIR`` (a prebuilt library), ``$AMBER_SRC`` (an engine checkout to
 build), a vendored ``vendor/amber`` tree, a sibling ``../amber`` checkout, and
 finally the system library path. When it finds sources rather than a library it
-runs the engine's own ``./build.sh --shared`` -- not a reimplementation of it,
+runs the engine's own ``./build.sh --shared-only`` -- not a reimplementation of it,
 because the engine's build script already knows how to probe for LTO, OpenMP and
 the right export-map flag on this toolchain, and a second copy of that logic
 here would rot.
 
-**Making the wheel self-contained.** ``pip install amber`` should give you a
+**Making the wheel self-contained.** ``pip install amber-lang`` should give you a
 working engine, not a working binding that then cannot find an engine. So the
 build copies both ``libamber.so`` and the eight ``.k`` standard-library modules
 into the package directory, and links the extension with an ``$ORIGIN`` rpath so
@@ -73,10 +73,13 @@ def _build_engine(src_dir: Path) -> Path:
     if lib.is_file() and not os.environ.get("AMBER_FORCE_REBUILD"):
         _log(f"using existing {lib}")
         return lib
-    _log(f"building the engine in {src_dir} (./build.sh --shared)")
-    subprocess.check_call(["bash", "./build.sh", "--shared"], cwd=str(src_dir))
+    _log(f"building the engine in {src_dir} (./build.sh --shared-only)")
+    # o/ first: on macOS build.sh writes its exported-symbols list there, and
+    # --shared-only (no executable, half the compile time) never creates it
+    (src_dir / "o").mkdir(exist_ok=True)
+    subprocess.check_call(["bash", "./build.sh", "--shared-only"], cwd=str(src_dir))
     if not lib.is_file():
-        raise SystemExit(f"python-amber: {src_dir}/build.sh --shared produced no {SONAME}")
+        raise SystemExit(f"python-amber: {src_dir}/build.sh --shared-only produced no {SONAME}")
     return lib
 
 
