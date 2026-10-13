@@ -148,3 +148,21 @@ def test_function_values_come_back_as_handles(am):
     f = am.eval("{x+1}")
     assert isinstance(f, am.Value)
     assert am.call("pyamber.at", f, 41) == 42           # and it can be passed back in
+
+
+def test_library_path_is_the_loaded_engine(am):
+    import os
+    path = am._amber.library_path()
+    assert path and os.path.isfile(path) and "amber" in os.path.basename(path)
+
+
+def test_adopt_takes_ownership(am):
+    import ctypes
+    lib = ctypes.CDLL(am._amber.library_path())
+    lib.amber_eval_str.restype = ctypes.c_uint64
+    lib.amber_eval_str.argtypes = [ctypes.c_char_p]
+    h = lib.amber_eval_str(b"10 20 30")
+    v = am._amber.adopt(h)
+    assert am.to_python(v).tolist() == [10, 20, 30]
+    with pytest.raises(ValueError):
+        am._amber.adopt(0)

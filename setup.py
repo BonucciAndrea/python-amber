@@ -198,7 +198,7 @@ def _extension():
         name="amber._amber",
         sources=["src/py_amber.c"],
         include_dirs=["include"],
-        libraries=["amber"],
+        libraries=["amber", "dl"] if sys.platform.startswith("linux") else ["amber"],   # dladdr: libdl before glibc 2.34
         library_dirs=[],
         runtime_library_dirs=rpath,
         extra_link_args=extra_link,

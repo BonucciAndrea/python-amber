@@ -56,6 +56,9 @@
 #endif
 
 #include <stdlib.h>
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#endif
 #include <string.h>
 
 /* ------------------------------------------------------------------------- */
@@ -1258,6 +1261,32 @@ static PyObject *py_symbol_name(PyObject *self, PyObject *arg) {
     return PyUnicode_FromString(amber_symbol_name((int)id));
 }
 
+/* Where the engine this module runs on was loaded from. A wheel repaired by
+ * auditwheel or delocate renames the library and moves it, so its path is only
+ * knowable from the loader; amber-arrow needs it to bind to THIS engine and not
+ * load a second one. */
+static PyObject *py_library_path(PyObject *self, PyObject *unused) {
+    (void)self; (void)unused;
+#if !defined(_WIN32)
+    {
+        Dl_info info;
+        if (dladdr((void *)(size_t)amber_version_string, &info) && info.dli_fname)
+            return PyUnicode_DecodeFSDefault(info.dli_fname);
+    }
+#endif
+    Py_RETURN_NONE;
+}
+
+/* Take ownership of a raw handle another library (amber-arrow) got from this
+ * engine. The caller gives its reference up: the Value now releases it. */
+static PyObject *py_adopt(PyObject *self, PyObject *arg) {
+    unsigned long long h = PyLong_AsUnsignedLongLong(arg);
+    (void)self;
+    if (h == (unsigned long long)-1 && PyErr_Occurred()) return NULL;
+    if (!h) { PyErr_SetString(PyExc_ValueError, "amber.adopt: null handle"); return NULL; }
+    return Value_wrap((amber_value)h);
+}
+
 /* The other half of Value.to_bytes(): bytes from the engine's serialiser back
  * into a Value. Malformed bytes are the engine's 'domain error, as an
  * AmberError -- `des checks every length it reads. */
@@ -1295,6 +1324,8 @@ static PyMethodDef module_methods[] = {
     { "symbol_name",     py_symbol_name,     METH_O,       "symbol_name(id) -> str." },
     { "from_bytes",      py_from_bytes,      METH_O,       "from_bytes(b) -> Value.  Read back what Value.to_bytes() wrote." },
     { "_set_convert_hook", py_set_convert_hook, METH_O,    "Internal: the Python fallback for objects the C converter has no rule for." },
+    { "library_path",    py_library_path,    METH_NOARGS,  "library_path() -> str | None.  Where the loaded libamber lives." },
+    { "adopt",           py_adopt,           METH_O,       "adopt(handle) -> Value.  Take ownership of a raw engine handle." },
     { "free_ptr",        py_free_ptr,        METH_O,       "free_ptr(addr) -- release an engine-allocated struct after Arrow moved its contents out." },
     { NULL, NULL, 0, NULL }
 };
