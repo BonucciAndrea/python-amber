@@ -79,7 +79,7 @@ __all__ = [
     "diagnostics", "shutdown",
 ]
 
-__version__ = "2.9.3"
+__version__ = "2.9.4"
 
 # --------------------------------------------------------------------------
 # boot
@@ -232,7 +232,9 @@ def q(line: str, *, raw: bool = False):
         raise TypeError(f"amber.q: expected str, got {type(line).__name__}")
     if "\n" in line.strip("\n") and _HOME is not None:
         src = to_python(_amber.call("qrwf", (line,)))
-        value = _amber.eval(src if isinstance(src, str) else line)
+        # qrwf pads a query it joins with the lines it took (for a script's line numbers): the value is the
+        # query's, not the empty line's after it
+        value = _amber.eval((src if isinstance(src, str) else line).rstrip())
     else:
         value = _amber.eval_qsql(line.strip("\n"))
     return value if raw else to_python(value)

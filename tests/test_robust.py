@@ -153,7 +153,6 @@ def test_multiline_q(am):
     assert out["a"].tolist() == [1, 2]
 
 
-@pytest.mark.xfail(strict=True, reason="engine: qjg stops a query at the line that brings its from (Amber 2.9.0)")
 def test_multiline_q_where_on_its_own_line(am):
     am.eval("ml2:([]a:1 2 3)")
     assert am.q("select a\n  from ml2\n  where a<3")["a"].tolist() == [1, 2]

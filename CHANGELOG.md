@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.9.4
+
+- Built on Amber 2.9.1: `v,:x` and `` `t insert `` add in place (a loop of them no longer slows down as it grows),
+  `am.q` takes a query whose `where` sits on its own line, `value` of query text works, and kdb+ string columns load.
+
 ## 2.9.3
 
 - The standard library bundled with the engine now wins over `$AMBER_HOME`. That variable is set wherever the REPL

@@ -8,7 +8,7 @@ on:
 
 env:
   # The engine release this package is built and tested against
-  ENGINE_REF: v2.9.0
+  ENGINE_REF: v2.9.1
 
 jobs:
   test:
